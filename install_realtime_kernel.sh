@@ -1,297 +1,271 @@
 #!/bin/bash
 clear
 
+# Funzione per verificare il modello di Raspberry Pi
+check_rpi_version() {
+    # Sopprime eventuali errori e cattura il modello
+    MODEL=$(cat /proc/cpuinfo 2>/dev/null | grep "Model" | awk '{print $5}')
+    
+    # Se il modello non viene rilevato o non è supportato, esce con un messaggio di errore
+    if [ -z "$MODEL" ]; then
+        echo "Error: Unable to detect Raspberry Pi model or unsupported model. Exiting :("
+        #exit 1
+    elif [ "$MODEL" = "4" ]; then
+        echo "Raspberry Pi 4"
+    elif [ "$MODEL" = "5" ]; then
+        echo "Raspberry Pi 5"
+    else
+        echo "Error: Unsupported Raspberry Pi model: $MODEL. Exiting :("
+        #exit 1
+    fi
+}
+
+
+
 echo "
     ____             ____  _                   __    _                 
    / __ \___  ____ _/ / /_(_)___ ___  ___     / /   (_)___  __  ___  __
   / /_/ / _ \/ __  / / __/ / __  __ \/ _ \   / /   / / __ \/ / / / |/_/
  / _, _/  __/ /_/ / / /_/ / / / / / /  __/  / /___/ / / / / /_/ />  <  
-/_/ |_|\___/\__,_/_/\__/_/_/ /_/ /_/\___/  /_____/_/_/ /_/\__,_/_/|_|
- 
+/_/ |_|\___/\__,_/_/\__/_/_/ /_/ /_/\___/  /_____/_/_/ /_/\__,_/_/|_|                               
                                                       on Raspberry Pi
 "
 
+check_rpi_version
 
 
-# Funzione per ottenere l'URL della release più recente
-get_latest_release_url() {
-    echo "Fetching latest release URL from GitHub..."
 
-    # Ottieni l'URL della release tramite l'API GitHub
-    RELEASE_URL=$(curl -s https://api.github.com/repos/antoniopicone/docker_rt/releases/latest | grep "tag_name" | cut -d '"' -f 4)
+# Funzione per ottenere tutte le release disponibili con la descrizione della commit
+get_all_releases() {
+    echo "Fetching available releases and their commit descriptions from GitHub..."
+    echo "Available releases:"
+    API_URL="https://api.github.com/repos/antoniopicone/docker_rt/releases"
 
-    if [[ -z "$RELEASE_URL" ]]; then
-        echo "Error: Could not fetch release URL."
-        exit 1
+    # Scarica le release da GitHub usando curl
+    RELEASES_JSON=$(curl -s "$API_URL")
+
+    # Estrai i tag delle release e i relativi body dal JSON
+    # tag_name è riportato come "tag_name": "valore", quindi filtriamo usando grep e sed
+    TAG_NAMES=$(echo "$RELEASES_JSON" | grep '"tag_name":' | sed -E 's/.*"tag_name": "(.*)",/\1/' | sed 's/^ *//;s/ *$//')
+    BODIES=$(echo "$RELEASES_JSON" | grep '"body":' | sed -E 's/.*"body": "(.*)",/\1/' | sed 's/\\r\\n/ /g' | sed 's/^ *"body"://g' | sed 's/^ *//;s/ *$//' | sed 's/"//g')
+
+    # Controlla se sono state trovate release
+    if [ -z "$TAG_NAMES" ]; then
+    echo "No releases available :(. Exiting."
+    exit 1
     fi
 
-    echo "Latest release URL: $RELEASE_URL"
+    # Mostra l'elenco delle release all'utente
+    i=1
+    # Utilizziamo un ciclo while con echo "in sequenza" per evitare problemi di IFS con pipe
+    while IFS= read -r tag; do
+        # Estrae l'i-esimo body
+        body=$(echo "$BODIES" | sed -n "${i}p" | sed 's/^ *//;s/ *$//')
+        echo "$i) Release $tag ( $body )"
+        i=$((i+1))
+    done << EOF
+    $TAG_NAMES
+EOF
+
+    # Aggiungi un'opzione per la selezione del kernel locale
+    echo "$i) Provide a local path to linux66_rt.tar.gz"
+
+    # Chiedi all'utente di scegliere una release
+    read -p "Select an option:  " choice
+
+    # Verifica che l'input dell'utente sia un numero valido
+    if ! [ "$choice" -ge 1 ] 2>/dev/null || [ "$choice" -gt $i ]; then
+    echo "Scelta non valida."
+    exit 1
+    fi
+
+    # Se l'utente sceglie l'opzione per il file kernel locale
+    if [ "$choice" -eq "$i" ]; then
+    read -p "Inserisci il percorso completo del file kernel: " kernel_path
+    select_local_file
+    fi
+
+    # Seleziona la release corrispondente se non è stata scelta l'opzione del kernel locale
+    i=1
+    echo "$TAG_NAMES" | while IFS= read -r tag; do
+    if [ "$i" -eq "$choice" ]; then
+        body=$(echo "$BODIES" | sed -n "${i}p")
+        RELEASE_URL=$tag
+        download_and_install_kernel
+        # Qui puoi aggiungere il codice per installare la release scelta
+        break
+    fi
+    i=$((i+1))
+    done
+
+    # echo "$i) Provide a local path to linux66_rt.tar.gz"
+    # echo ""
+    # read -p "Select a release or provide the path (enter number): " selection
+
+    # if [ "$selection" -eq "$i" ]; then
+    #     select_local_file
+    # else
+    #     selected_release=${RELEASE_TAGS[$((selection - 1))]}
+    #     if [[ -z "$selected_release" ]]; then
+    #         echo "Invalid selection."
+    #         exit 1
+    #     fi
+    #     RELEASE_URL=$selected_release
+    #     echo "Selected release: $RELEASE_URL"
+    #     download_and_install_kernel
+    # fi
 }
 
-check_rpi_version() {
 
-    MODEL=$(cat /proc/cpuinfo | grep "Model" | awk '{print $5}')
-
+# Funzione per verificare il file locale
+select_local_file() {
+    while true; do
+        read -p "Enter the local path to linux66_rt.tar.gz: " local_path
+        if [ -f "$local_path" ]; then
+            FILE_PATH="$local_path"
+            install_kernel_from_local_file
+            break
+        else
+            echo "File not found at the specified path."
+            echo "1) Try again"
+            echo "2) Return to menu"
+            read -p "Choose an option: " retry_option
+            case $retry_option in
+                1) continue ;;
+                2) menu ;;
+                *) echo "Invalid option, returning to menu."; menu ;;
+            esac
+        fi
+    done
 }
 
-download_linux_rt() {
+# Funzione per scaricare e installare il kernel real-time
+download_and_install_kernel() {
     
-    # Ottenere l'URL della release più recente
-    get_latest_release_url
-    check_rpi_version
-    
-    # Controlla se il modello è Raspberry Pi 4 o 5 e scarica il file corretto
     if [ "$MODEL" = "4" ]; then
-        echo "Raspberry Pi 4 detected. Downloading file for Raspberry Pi 4..."
-        wget -O linux66_rt.tar.gz https://github.com/antoniopicone/docker_rt/releases/download/$RELEASE_URL/linux66_rt_bcm2711_defconfig.tar.gz
+        echo "Downloading $RELEASE_URL file for Raspberry Pi 4..."
+        wget -q -O linux66_rt.tar.gz https://github.com/antoniopicone/docker_rt/releases/download/$RELEASE_URL/linux66_rt_bcm2711_defconfig.tar.gz
     elif [ "$MODEL" = "5" ]; then
-        echo "Raspberry Pi 5 detected. Downloading file for Raspberry Pi 5..."
-        wget -O linux66_rt.tar.gz https://github.com/antoniopicone/docker_rt/releases/download/$RELEASE_URL/linux66_rt_bcm2712_defconfig.tar.gz
+        echo "Downloading $RELEASE_URL file for Raspberry Pi 5..."
+        wget -q -O linux66_rt.tar.gz https://github.com/antoniopicone/docker_rt/releases/download/$RELEASE_URL/linux66_rt_bcm2712_defconfig.tar.gz
     else
         echo "Unsupported Raspberry Pi model: $MODEL"
         exit 1
     fi
 
+    tar -xzf linux66_rt.tar.gz -C ./
+    install_rt_kernel
+}
 
+# Funzione per installare il kernel da file locale
+install_kernel_from_local_file() {
+    tar -xzf "$FILE_PATH" -C ./
+    install_rt_kernel
 }
 
 
-# Spinner function
-spinner() {
-    local pid=$1
-    local delay=0.1
-    local spinstr='|/-\\'
-    tput civis
-    while [ "$(ps a | awk '{print $1}' | grep $pid)" ]; do
-        local temp=${spinstr#?}
-        printf " [%c]  " "$spinstr"
-        local spinstr=$temp${spinstr%"$temp"}
-        sleep $delay
-        printf "\\b\\b\\b\\b\\b\\b"
-    done
-    printf "    \\b\\b\\b\\b"
-    tput cnorm
-}
-
-# Function to run commands and show spinner
-run_with_spinner() {
-    local func="$1"
-    local description="$2"
-
-    printf "• %s... " "$description"
-    $func > /dev/null 2>&1 &   # Run the function in the background
-    pid=$!
-    spinner $pid
-    wait $pid
-    if [ $? -eq 0 ]; then
-        printf "\\e[32m✔\\e[0m\\n"  # Green checkmark after success
-    else
-        printf "\\e[31m✖\\e[0m\\n"  # Red cross after failure
-    fi
-}
-
-LINUX_KERNEL_VERSION=6.6
-LINUX_KERNEL_RT_PATCH=patch-6.6.30-rt30
-LINUX_KERNEL_BRANCH=stable_20240529
-HW_SPECIFIC_CONFIG=bcm2711_defconfig # Raspberry Pi 4B
-
-update_os() {
-    apt-get update
-    dpkg --configure -a
-    apt-get upgrade -y
-    apt-get install -y git wget zip unzip fdisk curl xz-utils bash vim raspi-utils cpufrequtils
-}
-
+# Funzione per installare il kernel RT
 install_rt_kernel() {
 
     readonly KERNEL_SETUP_DIR=$(pwd)
 
-    tar xzf linux66_rt.tar.gz 
+    if [[ -n "$FILE_PATH" ]]; then
+        tar -xzf "$FILE_PATH" -C ./
+    else
+        tar -xzf linux66_rt.tar.gz -C ./
+    fi
 
     cd linux
 
     make -j$(nproc) modules_install
 
-    cp ./arch/arm64/boot/Image /boot/firmware/Image66_rt.img
-    cp ./arch/arm64/boot/dts/broadcom/*.dtb /boot/firmware/
-    cp ./arch/arm64/boot/dts/overlays/*.dtb* /boot/firmware/overlays/
-    cp ./arch/arm64/boot/dts/overlays/README /boot/firmware/overlays/
-    echo "kernel=Image66_rt.img" >> /boot/firmware/config.txt
+    cp -rf ./arch/arm64/boot/Image /boot/firmware/Image66_rt.img
+    cp -rf ./arch/arm64/boot/dts/broadcom/*.dtb /boot/firmware/
+    cp -rf ./arch/arm64/boot/dts/overlays/*.dtb* /boot/firmware/overlays/
+    cp -rf ./arch/arm64/boot/dts/overlays/README /boot/firmware/overlays/
+    #echo "kernel=Image66_rt.img" >> /boot/firmware/config.txt
+    if grep -q "^kernel=[^ ]\+" /boot/firmware/config.txt; then
+        # Se la stringa "kernel=" seguita da una parola esiste, la sostituisci con "kernel=image66_rt.img"
+        sed -i 's/^kernel=[^ ]\+/kernel=image66_rt.img/' /boot/firmware/config.txt
+    else
+        # Se la stringa non esiste, la aggiungi alla fine del file
+        echo "kernel=Image66_rt.img" >> /boot/firmware/config.txt
+    fi
 
     # Create cpu device for realtime containers
     mkdir -p /dev/cpu
     mknod /dev/cpu/0 b 5 1
 
     # Set C0 to avoid idle on CPUs
-    sed -i 's/rootwait/rootwait processor.max_cstate=0 intel_idle.max_cstate=0 idle=poll/' /boot/firmware/cmdline.txt
+    # Definisci i parametri da cercare
+    PARAMS="processor.max_cstate=0 intel_idle.max_cstate=0 idle=pol"
+
+    # Verifica se i parametri esistono già nel file cmdline.txt dopo "rootwait"
+    if grep -q "rootwait.*$PARAMS" /boot/firmware/cmdline.txt; then
+        echo "I parametri sono già presenti nel file cmdline.txt"
+    else
+        # Se i parametri non esistono, aggiungili dopo "rootwait"
+        sed -i 's/\(rootwait\)/\1 '"$PARAMS"'/' /boot/firmware/cmdline.txt
+        echo "I parametri sono stati aggiunti a cmdline.txt"
+    fi
 }
 
 
-# Disable gui
-disable_gui() {
-    systemctl set-default multi-user.target
-}
 
-# Disable power management
-disable_power_mgmt() {
-    systemctl mask sleep.target suspend.target hibernate.target hybrid-sleep.target
-
-}
-
-# Disable unnecessary services
-disable_unnecessary_services() {
-    systemctl disable bluetooth
-    #systemctl disable avahi-daemon
-    systemctl disable irqbalance
-    systemctl disable cups
-    systemctl disable ModemManage
-    systemctl disable triggerhappy
-    # systemctl disable wpa_supplicant
-}
-
-# Funzione per installare Docker
-install_docker() {
-    # Add Docker's official GPG key:
-    apt-get update
-    apt-get install -y ca-certificates curl
-    install -m 0755 -d /etc/apt/keyrings
-    curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc
-    chmod a+r /etc/apt/keyrings/docker.asc
-
-    # Add the repository to Apt sources:
-    echo \
-    "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian \
-    $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | \
-    tee /etc/apt/sources.list.d/docker.list > /dev/null
-    apt-get update
-
-    # Aggiorna e installa Docker
-    apt update
-    apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
-
-    # Abilita Docker al boot
-    systemctl enable docker
-    
-    # Post installation script
-    usermod -aG docker $SUDO_USER
-}
-
-tune_system_for_realtime() {
-
-    addgroup realtime
-    usermod -a -G realtime $SUDO_USER
-    tee /etc/security/limits.conf > /dev/null << EOF 
-@realtime soft rtprio 99
-@realtime soft priority 99
-@realtime soft memlock 102400
-@realtime hard rtprio 99
-@realtime hard priority 99
-@realtime hard memlock 102400
-EOF
-
-
-    echo "force_turbo=1" >> /boot/firmware/config.txt
-    echo "arm_freq=1500" >> /boot/firmware/config.txt
-    echo "arm_freq_min=1500" >> /boot/firmware/config.txt
-
-    sed -i 's/rootwait/rootwait rcu_nocb_poll rcu_nocbs=2,3 nohz=on nohz_full=2,3 kthread_cpus=0,1 irqaffinity=0,1 isolcpus=managed_irq,domain,2,3/' /boot/firmware/cmdline.txt
-    echo 'GOVERNOR="performance"' | sudo tee /etc/default/cpufrequtils
-    systemctl disable ondemand
-    systemctl enable cpufrequtils
-}
-
-enable_ethernet_over_usbc() {
-
-    sed -i 's/rootwait/rootwait modules-load=dwc2,g_ether/' /boot/firmware/cmdline.txt
-    sh -c 'echo "dtoverlay=dwc2,dr_mode=peripheral" >> /boot/firmware/config.txt'
-    sh -c 'echo "libcomposite" >> /etc/modules'
-    sh -c 'echo "denyinterfaces usb0" >> /etc/dhcpcd.conf'
-
-    # Install dnsmasq
-    apt-get update
-    apt-get install -y dnsmasq
-    apt-get clean
-
-    tee /etc/dnsmasq.d/usb > /dev/null << EOF
-interface=usb0
-dhcp-range=10.55.0.2,10.55.0.6,255.255.255.248,1h
-dhcp-option=3
-leasefile-ro
-EOF
-
-    
-    tee /etc/network/interfaces.d/usb0 > /dev/null << EOF
-auto usb0
-allow-hotplug usb0
-iface usb0 inet static
-address 10.55.0.1
-netmask 255.255.255.248    
-EOF
-    
-    tee /root/usb.sh > /dev/null << EOF
-#!/bin/bash
-cd /sys/kernel/config/usb_gadget/
-mkdir -p pi4
-cd pi4
-echo 0x1d6b > idVendor # Linux Foundation
-echo 0x0104 > idProduct # Multifunction Composite Gadget
-echo 0x0100 > bcdDevice # v1.0.0
-echo 0x0200 > bcdUSB # USB2
-echo 0xEF > bDeviceClass
-echo 0x02 > bDeviceSubClass
-echo 0x01 > bDeviceProtocol
-mkdir -p strings/0x409
-echo "fedcba9876543211" > strings/0x409/serialnumber
-echo "Antonio Picone" > strings/0x409/manufacturer
-echo "Raspberry PI USB Device" > strings/0x409/product
-mkdir -p configs/c.1/strings/0x409
-echo "Config 1: ECM network" > configs/c.1/strings/0x409/configuration
-echo 250 > configs/c.1/MaxPower
-# Add functions here
-# see gadget configurations below
-# End functions
-mkdir -p functions/ecm.usb0
-HOST="00:dc:c8:f7:75:14" # "HostPC"
-SELF="00:dd:dc:eb:6d:a1" # "BadUSB"
-echo $HOST > functions/ecm.usb0/host_addr
-echo $SELF > functions/ecm.usb0/dev_addr
-ln -s functions/ecm.usb0 configs/c.1/
-udevadm settle -t 5 || :
-ls /sys/class/udc > UDC
-ifup usb0
-service dnsmasq restart
-EOF
-    chmod +x /root/usb.sh
-    sed -i 's|exit 0|/root/usb.sh\nexit 0|' /etc/rc.local
-
-}
-
-cleanup() {
-
-    apt-get -y clean
-    cd "$KERNEL_SETUP_DIR"
-    rm linux66_rt.tar.gz
-    rm -rf ./linux
-    
-}
-
-# Funzione per richiedere all'utente di premere un tasto per il riavvio
-request_reboot() {
+# Menu principale
+menu() {
     echo ""
-    echo "All done."
-    echo "Please reboot the system and enjoy your realtime kernel!"
-    
+    echo "Please select an option (default is 11):"
+    echo "1) Update OS"
+    echo "2) Disable unnecessary services"
+    echo "3) Disable GUI"
+    echo "4) Disable power management"
+    echo "5) Install Docker"
+    echo "6) Download and Install Linux RT kernel"
+    echo "7) Tune system for realtime"
+    echo "8) Enable Ethernet over USB-C"
+    echo "9) Clean up the system"
+    echo "10) Execute all steps"
+    echo "11) Exit"
+    echo ""
+    read -p "Enter your choice [1-11]: " choice
+
+    choice=${choice:-10}
+
+    case $choice in
+        1) run_with_spinner update_os "Updating OS"; menu ;;
+        2) run_with_spinner disable_unnecessary_services "Disabling unnecessary services"; menu ;;
+        3) run_with_spinner disable_gui "Disabling GUI"; menu ;;
+        4) run_with_spinner disable_power_mgmt "Disabling power management"; menu ;;
+        5) run_with_spinner install_docker "Installing Docker"; menu ;;
+        6) get_all_releases; menu ;;
+        7) run_with_spinner tune_system_for_realtime "Tuning system for realtime"; menu ;;
+        8) run_with_spinner enable_ethernet_over_usbc "Enabling Ethernet over USB-C"; menu ;;
+        9) run_with_spinner cleanup "Cleaning up the system"; menu ;;
+        10) 
+            run_with_spinner update_os "Updating OS"
+            run_with_spinner disable_unnecessary_services "Disabling unnecessary services"
+            run_with_spinner disable_gui "Disabling GUI"
+            run_with_spinner disable_power_mgmt "Disabling power management"
+            run_with_spinner install_docker "Installing Docker"
+            get_all_releases
+            run_with_spinner tune_system_for_realtime "Tuning system for realtime"
+            run_with_spinner enable_ethernet_over_usbc "Enabling Ethernet over USB-C"
+            run_with_spinner cleanup "Cleaning up the system"
+            request_reboot
+            ;;
+        11) echo "Exiting..."; exit 0 ;;
+        *) echo "Invalid option, please try again."; menu ;;
+    esac
 }
 
+# Avvia il menu
+menu
+            ;;
+        11) echo "Exiting..."; exit 0 ;;
+        *) echo "Invalid option, please try again."; menu ;;
+    esac
+}
 
-run_with_spinner update_os "Updating OS"
-run_with_spinner disable_unnecessary_services "Disabling unnecessary services"
-run_with_spinner disable_gui "Disabling GUI"
-run_with_spinner disable_power_mgmt "Disabling power management"
-run_with_spinner install_docker "Installing Docker"
-run_with_spinner download_linux_rt "Downloading pre-built Linux 6.6 Realtime kernel from repository"
-run_with_spinner install_rt_kernel "Installing RT kernel (will take some minutes)"
-run_with_spinner tune_system_for_realtime "Tuning system for realtime"
-run_with_spinner enable_ethernet_over_usbc "Enabling Ethernet over USB-C"
-run_with_spinner cleanup "Cleaning up the system"
-request_reboot
+# Avvia il menu
+menu
