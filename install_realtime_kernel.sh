@@ -5,6 +5,10 @@ LINUX_KERNEL_RT_PATCH=patch-6.6.30-rt30
 LINUX_KERNEL_BRANCH=stable_20240529
 HW_SPECIFIC_CONFIG=bcm2711_defconfig # Raspberry Pi 4B
 
+# Global variables for process management
+cmd_pid=""
+spinner_pid=""
+
 clear
 
 echo "
@@ -17,21 +21,23 @@ echo "
                                                       on Raspberry Pi
 "
 
-# Handle signals
-cleanup_int () {
+# Improved signal handling
+cleanup_int() {
     echo ""
-    echo "Interruzione richiesta. Terminazione del processo."
     if [ -n "$spinner_pid" ]; then
-        kill "$spinner_pid" 2>/dev/null  # Uccidi il processo dello spinner
+        kill "$spinner_pid" 2>/dev/null
     fi
     if [ -n "$cmd_pid" ]; then
-        kill "$cmd_pid" 2>/dev/null  # Uccidi il processo in background
+        kill -TERM "$cmd_pid" 2>/dev/null
+        wait "$cmd_pid" 2>/dev/null
     fi
-    tput cnorm  # Ripristina il cursore
+    tput cnorm  # Restore cursor
     tput rc
-	exit 1
-	
+    exit 1
 }
+
+# Set up trap for various signals
+trap cleanup_int INT TERM QUIT
 
 init() {
 
@@ -59,51 +65,61 @@ check_rpi_version() {
 
 
 
-
-
-
-spinner () {
-  local pid=$1
-  local delay=0.1
-  local symbols="⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏"  
-  local colornum=3 # 3=yellow
-  local reset=$(tput sgr0)
-  local description=$2
-  
-  while kill -0 $pid 2>/dev/null; do
-    tput civis
-    for c in $symbols; do
-      color=$(tput setaf ${colornum})
-      tput sc
-      env printf "${color}${c}${reset} ${description}"
-      tput rc
-      env sleep .1
-      if ! kill -0 "$pid" 2>/dev/null; then
-        break
-      fi  
+spinner() {
+    local pid=$1
+    local delay=0.1
+    local symbols="⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏"  
+    local colornum=3 # 3=yellow
+    local reset=$(tput sgr0)
+    local description=$2
+    
+    while kill -0 $pid 2>/dev/null; do
+        tput civis
+        for c in $symbols; do
+            color=$(tput setaf ${colornum})
+            tput sc
+            printf "${color}${c}${reset} ${description}"
+            tput rc
+            sleep .1
+            if ! kill -0 "$pid" 2>/dev/null; then
+                break
+            fi  
+        done
+        tput el
     done
-    tput el
-  done
-  tput cnorm
-  tput rc
-  return 0
+    tput cnorm
+    tput rc
 }
 
 run_with_spinner() {
-    # This tries to catch any exit, to reset cursor
-    trap cleanup_int INT QUIT TERM
     local func=$1
     local description="$2"
+    
+    # Run the function in background and capture its PID
     $func > /dev/null 2>&1 &
-    local pid=$!
-    spinner $pid "$description"
-    wait $pid
-    if [ $? -eq 0 ]; then
+    cmd_pid=$!
+    
+    # Run spinner in background
+    spinner $cmd_pid "$description" &
+    spinner_pid=$!
+    
+    # Wait for the command to finish
+    wait $cmd_pid
+    local exit_status=$?
+    
+    # Kill the spinner
+    kill $spinner_pid 2>/dev/null
+    wait $spinner_pid 2>/dev/null
+    
+    if [ $exit_status -eq 0 ]; then
         printf "\033[32m✔\033[0m %s\n" "$description"
     else
         printf "\033[31m✖\033[0m %s\n" "$description"
+        echo "Error occurred during: $description"
+        exit 1
     fi
 }
+
 
 update_os() {
     apt-get update
@@ -129,12 +145,12 @@ disable_power_mgmt() {
 # Disable unnecessary services
 disable_unnecessary_services() {
     systemctl disable bluetooth
-    #systemctl disable avahi-daemon
+    systemctl disable avahi-daemon
     systemctl disable irqbalance
     systemctl disable cups
     systemctl disable ModemManage
     systemctl disable triggerhappy
-    # systemctl disable wpa_supplicant
+    #systemctl disable wpa_supplicant
 }
 
 # Funzione per installare Docker
